@@ -95,7 +95,7 @@ _have_iproute2() {
 		SKIP_REASON="ip utility not found"
 		return 1
 	fi
-	if [ "$snapshot" -lt "$1" ]; then
+	if [[ "$snapshot" =~ ^[0-9]+$ && "$snapshot" -lt "$1" ]]; then
 		SKIP_REASON="ip utility too old"
 		return 1
 	fi
@@ -181,6 +181,14 @@ _have_tracepoint() {
 	return 0
 }
 
+_have_fs() {
+	modprobe "$1" >/dev/null 2>&1
+	if [[ ! -d "/sys/fs/$1" ]]; then
+		SKIP_REASON="kernel does not support filesystem $1"
+		return 1
+	fi
+}
+
 _test_dev_is_rotational() {
 	[[ $(cat "${TEST_DEV_SYSFS}/queue/rotational") -ne 0 ]]
 }
@@ -261,7 +269,7 @@ _require_test_dev_in_hotplug_slot() {
 
 	local slt_cap
 	slt_cap="$(setpci -s "${parent}" CAP_EXP+14.w)"
-	if [[ $((0x${slt_cap} & 0x20)) -eq 0 ]]; then
+	if [[ $((0x${slt_cap} & 0x60)) -ne 0x60 ]]; then
 		SKIP_REASON="$TEST_DEV is not in a hot pluggable slot"
 		return 1
 	fi
@@ -270,6 +278,27 @@ _require_test_dev_in_hotplug_slot() {
 
 _test_dev_is_partition() {
 	[[ -n ${TEST_DEV_PART_SYSFS} ]]
+}
+
+# Return max open zones or max active zones of the test target device.
+# If the device has both, return smaller value.
+_test_dev_max_open_active_zones() {
+	local -i moz=0
+	local -i maz=0
+
+	if [[ -r "${TEST_DEV_SYSFS}/queue/max_open_zones" ]]; then
+		moz=$(_test_dev_queue_get max_open_zones)
+	fi
+
+	if [[ -r "${TEST_DEV_SYSFS}/queue/max_active_zones" ]]; then
+		maz=$(_test_dev_queue_get max_active_zones)
+	fi
+
+	if ((!moz)) || ((maz && maz < moz)); then
+		echo "${maz}"
+	else
+		echo "${moz}"
+	fi
 }
 
 _require_test_dev_is_partition() {
@@ -290,4 +319,17 @@ _filter_xfs_io_error() {
 # System uptime in seconds.
 _uptime_s() {
 	awk '{ print int($1) }' /proc/uptime
+}
+
+# Arguments: module to unload ($1) and retry count ($2).
+unload_module() {
+	local i m=$1 rc=${2:-1}
+
+	[ ! -e "/sys/module/$m" ] && return 0
+	for ((i=rc;i>0;i--)); do
+		modprobe -r "$m"
+		[ ! -e "/sys/module/$m" ] && return 0
+		sleep .1
+	done
+	return 1
 }

@@ -16,9 +16,11 @@ group_requires() {
 
 	# Since the nvmeof-mp tests are based on the dm-mpath driver, these
 	# tests are incompatible with the NVME_MULTIPATH kernel configuration
-	# option.
-	if _have_kernel_option NVME_MULTIPATH; then
-		SKIP_REASON="CONFIG_NVME_MULTIPATH has been set in .config"
+	# option with multipathing enabled in the nvme_core kernel module.
+	if _have_kernel_option NVME_MULTIPATH && \
+		_have_module_param_value nvme_core multipath Y; then
+		SKIP_REASON="CONFIG_NVME_MULTIPATH has been set in .config \
+and multipathing has been enabled in the nvme_core kernel module"
 		return
 	fi
 
@@ -40,7 +42,7 @@ group_requires() {
 	)
 	_have_modules "${required_modules[@]}" || return
 
-	for p in mkfs.ext4 mkfs.xfs multipath multipathd pidof; do
+	for p in mkfs.ext4 mkfs.xfs multipath multipathd pidof rdma fio; do
 		_have_program "$p" || return
 	done
 
@@ -87,13 +89,17 @@ use_blk_mq() {
 }
 
 log_in() {
-	local i ipv4_addr
+	local i ipv4_addr loginparams
 
 	[ -c /dev/nvme-fabrics ] &&
 		for i in $(rdma_network_interfaces); do
 			ipv4_addr=$(get_ipv4_addr "$i")
 			if [ -n "${ipv4_addr}" ]; then
-				{ echo -n "transport=rdma,traddr=${ipv4_addr},trsvcid=${nvme_port},nqn=$nvme_subsysnqn" > /dev/nvme-fabrics; } 2>>"$FULL"
+				loginparams="transport=rdma,traddr=${ipv4_addr},trsvcid=${nvme_port},nqn=$nvme_subsysnqn"
+				echo "Login parameters: $loginparams" >>"$FULL"
+				{
+					echo -n "$loginparams" > /dev/nvme-fabrics
+				} 2>>"$FULL"
 			fi
 		done
 }
@@ -143,19 +149,6 @@ remove_mpath_devs() {
 
 		remove_stale_mpath_devs
 	} &>> "$FULL"
-}
-
-# Arguments: module to unload ($1) and retry count ($2).
-unload_module() {
-	local i m=$1 rc=${2:-1}
-
-	[ ! -e "/sys/module/$m" ] && return 0
-	for ((i=rc;i>0;i--)); do
-		modprobe -r "$m"
-		[ ! -e "/sys/module/$m" ] && return 0
-		sleep .1
-	done
-	return 1
 }
 
 start_nvme_client() {
@@ -249,7 +242,7 @@ start_nvme_target() {
 				true
 			fi
 		done &&
-		if [ $num_ports = 0 ]; then
+		if [[ $num_ports = 0 ]]; then
 			echo "No NVMeOF target ports"
 			false
 		fi && (
@@ -272,8 +265,8 @@ stop_nvme_target() {
 			rm -f -- ports/*/subsystems/* &&
 			for d in {*/*/*/*,*/*}; do
 				[ -e "$d" ] &&
-					[ "$(basename "$(dirname "$d")")" != ana_groups ] &&
-					rmdir "$d"
+				[[ ! "$(basename "$(dirname "$d")")" =~ ana_groups|passthru ]] &&
+				rmdir "$d"
 			done
 	)
 	unload_module nvmet_rdma &&

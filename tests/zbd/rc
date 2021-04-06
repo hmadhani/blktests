@@ -41,7 +41,9 @@ export ZONE_TYPE_SEQ_WRITE_PREFERRED=3
 export ZONE_COND_EMPTY=1
 export ZONE_COND_IMPLICIT_OPEN=2
 export ZONE_COND_CLOSED=4
+export ZONE_COND_READ_ONLY=13
 export ZONE_COND_FULL=14
+export ZONE_COND_OFFLINE=15
 
 export ZONE_TYPE_ARRAY=(
 	[1]="CONVENTIONAL"
@@ -104,6 +106,7 @@ _put_sysfs_variable() {
 # until put function call.
 _get_blkzone_report() {
 	local target_dev=${1}
+	local cap_idx wptr_idx conds_idx type_idx
 
 	# Initialize arrays to store parsed blkzone reports.
 	# Number of reported zones is set in REPORTED_COUNT.
@@ -111,6 +114,7 @@ _get_blkzone_report() {
 	# to simplify loop operation.
 	ZONE_STARTS=()
 	ZONE_LENGTHS=()
+	ZONE_CAPS=()
 	ZONE_WPTRS=()
 	ZONE_CONDS=()
 	ZONE_TYPES=()
@@ -123,6 +127,17 @@ _get_blkzone_report() {
 		return $?
 	fi
 
+	cap_idx=3
+	wptr_idx=5
+	conds_idx=11
+	type_idx=13
+	if grep -qe "cap 0x" "${TMP_REPORT_FILE}"; then
+		cap_idx=5
+		wptr_idx=7
+		conds_idx=13
+		type_idx=15
+	fi
+
 	local _IFS=$IFS
 	local -i loop=0
 	IFS=$' ,:'
@@ -130,9 +145,10 @@ _get_blkzone_report() {
 	do
 		ZONE_STARTS+=($((_tokens[1])))
 		ZONE_LENGTHS+=($((_tokens[3])))
-		ZONE_WPTRS+=($((_tokens[5])))
-		ZONE_CONDS+=($((${_tokens[11]%\(*})))
-		ZONE_TYPES+=($((${_tokens[13]%\(*})))
+		ZONE_CAPS+=($((_tokens[cap_idx])))
+		ZONE_WPTRS+=($((_tokens[wptr_idx])))
+		ZONE_CONDS+=($((${_tokens[conds_idx]%\(*})))
+		ZONE_TYPES+=($((${_tokens[type_idx]%\(*})))
 		if [[ ${ZONE_TYPES[-1]} -eq ${ZONE_TYPE_CONVENTIONAL} ]]; then
 			(( NR_CONV_ZONES++ ))
 		fi
@@ -150,6 +166,7 @@ _get_blkzone_report() {
 	local -i max_idx=$((REPORTED_COUNT - 1))
 	ZONE_STARTS+=( $((ZONE_STARTS[max_idx] + ZONE_LENGTHS[max_idx])) )
 	ZONE_LENGTHS+=( "${ZONE_LENGTHS[max_idx]}" )
+	ZONE_CAPS+=( "${ZONE_CAPS[max_idx]}" )
 	ZONE_WPTRS+=( "${ZONE_WPTRS[max_idx]}" )
 	ZONE_CONDS+=( "${ZONE_CONDS[max_idx]}" )
 	ZONE_TYPES+=( "${ZONE_TYPES[max_idx]}" )
@@ -160,6 +177,7 @@ _get_blkzone_report() {
 _put_blkzone_report() {
 	unset ZONE_STARTS
 	unset ZONE_LENGTHS
+	unset ZONE_CAPS
 	unset ZONE_WPTRS
 	unset ZONE_CONDS
 	unset ZONE_TYPES
@@ -237,21 +255,28 @@ _find_sequential_zone_in_middle() {
 	return 1
 }
 
-# Search zones and find two contiguous sequential required zones.
+# Search zones and find two contiguous sequential write required zones.
 # Return index of the first zone of the found two zones.
+# When the argument cap_eq_len is specified, find the two contiguous
+# sequential write required zones with first zone that has zone capacity
+# same as zone size.
 # Call _get_blkzone_report() beforehand.
 _find_two_contiguous_seq_zones() {
+	local cap_eq_len="${1}"
 	local -i type_seq=${ZONE_TYPE_SEQ_WRITE_REQUIRED}
 
 	for ((idx = NR_CONV_ZONES; idx < REPORTED_COUNT; idx++)); do
 		if [[ ${ZONE_TYPES[idx]} -eq ${type_seq} &&
 		      ${ZONE_TYPES[idx+1]} -eq ${type_seq} ]]; then
+			if [[ -n ${cap_eq_len} ]] &&
+				   ((ZONE_CAPS[idx] != ZONE_LENGTHS[idx])); then
+				continue
+			fi
 			echo "${idx}"
 			return 0
 		fi
 	done
 
-	echo "Contiguous sequential write required zones not found"
 	return 1
 }
 
